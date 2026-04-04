@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>沪深300 | 资金与指数背离追踪系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            void: { 950: "#070b14", 900: "#0c1222", 800: "#121a2e", 700: "#1a2540" },
+            glass: "rgba(30, 41, 59, 0.55)",
+          },
+          boxShadow: {
+            card: "0 4px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255,255,255,0.06)",
+            cardHover: "0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(96, 165, 250, 0.15)",
+            alert: "0 0 0 1px rgba(248, 113, 113, 0.5), 0 8px 32px rgba(239, 68, 68, 0.2)",
+          },
+        },
+      },
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    body {
+      background: radial-gradient(ellipse 120% 80% at 50% -20%, rgba(37, 99, 235, 0.12), transparent),
+        linear-gradient(180deg, #070b14 0%, #0a0f1a 40%, #0c1222 100%);
+      min-height: 100vh;
+    }
+    .glass-border {
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: linear-gradient(145deg, rgba(30, 41, 59, 0.65) 0%, rgba(15, 23, 42, 0.5) 100%);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .period-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    .period-card:hover {
+      transform: translateY(-2px) scale(1.02);
+    }
+    .chart-shell {
+      transition: box-shadow 0.25s ease;
+    }
+    .chart-shell:hover {
+      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+  </style>
+</head>
+<body class="text-slate-200 antialiased">
+  <!-- ========== Header ========== -->
+  <header
+    class="sticky top-0 z-50 glass-border border-b border-slate-700/30 px-4 py-3 md:px-8"
+  >
+    <div class="mx-auto flex max-w-7xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex items-center gap-3">
+        <div
+          class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-600/20 ring-1 ring-blue-400/20"
+        >
+          <!-- 金融/科技折线图标 -->
+          <svg
+            class="h-6 w-6 text-sky-400"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+          >
+            <path
+              d="M4 16l4-4 3 3 5-6 4 4"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M4 20h16"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              opacity="0.5"
+            />
+            <circle cx="8" cy="12" r="1.5" fill="currentColor" />
+            <circle cx="11" cy="15" r="1.5" fill="currentColor" />
+            <circle cx="16" cy="9" r="1.5" fill="#34d399" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-lg font-semibold tracking-tight text-white md:text-xl">
+            沪深300 <span class="text-slate-500">|</span> 资金与指数背离追踪系统
+          </h1>
+          <p class="text-xs text-slate-500">Quant · Multi-horizon divergence monitor</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span
+          id="header-updated"
+          class="inline-flex items-center rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400"
+        >
+          最新数据更新时间：<span id="header-date" class="ml-1 font-mono text-emerald-300">—</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-8">
+    <!-- ========== 多周期预警卡片（Mock + 可切换真实 data.json）========== -->
+    <section class="mb-8">
+      <div class="mb-4 flex items-end justify-between gap-2">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+          多周期状态
+        </h2>
+        <span id="data-source-hint" class="text-xs text-slate-600">演示数据</span>
+      </div>
+      <div
+        id="period-cards"
+        class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5"
+      ></div>
+    </section>
+
+    <!-- ========== 主图 ========== -->
+    <section class="chart-shell glass-border rounded-2xl border border-slate-700/40 p-4 md:p-6">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-base font-semibold text-white md:text-lg">
+          8大 ETF 总规模 vs 沪深300指数 走势
+        </h2>
+        <span class="text-xs text-slate-500">支持底部拖拽缩放 · 十字准星联动</span>
+      </div>
+      <div id="main-chart" class="h-[420px] w-full md:h-[480px]"></div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      const PERIOD_KEYS = ["1", "5", "13", "30", "60"];
+      const PERIOD_LABELS = {
+        1: "1日超短线",
+        5: "5日短线",
+        13: "13日短线趋势",
+        30: "30日中线",
+        60: "60日波段",
+      };
+
+      /**
+       * Mock：1 个正常同向 + 2 个背离，便于离线预览 UI
+       */
+      const MOCK_DASHBOARD = {
+        meta: { updated_at: "2026-04-05T18:00:00" },
+        history: [],
+        /** 仅用于卡片：模拟最新一日的多周期结果 */
+        mockPeriods: {
+          "1": {
+            sufficient: true,
+            etf_trend: "up",
+            index_trend: "up",
+            divergence: false,
+            etf_change_pct: 0.18,
+            index_change_pct: 0.42,
+            compare_date: "2026-04-04",
+            label: "无背离",
+          },
+          "5": {
+            sufficient: true,
+            etf_trend: "up",
+            index_trend: "down",
+            divergence: true,
+            etf_change_pct: 1.25,
+            index_change_pct: -0.88,
+            compare_date: "2026-03-31",
+            label: "规模↑ 指数↓（资金与指数背离）",
+          },
+          "13": {
+            sufficient: true,
+            etf_trend: "down",
+            index_trend: "up",
+            divergence: true,
+            etf_change_pct: -0.62,
+            index_change_pct: 2.15,
+            compare_date: "2026-03-24",
+            label: "规模↓ 指数↑（资金与指数背离）",
+          },
+          "30": {
+            sufficient: true,
+            etf_trend: "up",
+            index_trend: "up",
+            divergence: false,
+            etf_change_pct: 3.1,
+            index_change_pct: 1.05,
+            compare_date: "2026-03-06",
+            label: "无背离",
+          },
+          "60": {
+            sufficient: true,
+            etf_trend: "flat",
+            index_trend: "flat",
+            divergence: false,
+            etf_change_pct: 0.01,
+            index_change_pct: -0.02,
+            compare_date: "2026-02-05",
+            label: "无背离",
+          },
+        },
+      };
+
+      function formatDateHeader(iso) {
+        if (!iso) return "—";
+        return String(iso).slice(0, 10);
+      }
+
+      function genMockHistory60() {
+        const out = [];
+        const today = new Date();
+        for (let i = 59; i >= 0; i--) {
+          const d = new Date(today);
+          d.setDate(d.getDate() - i);
+          const ds =
+            d.getFullYear() +
+            "-" +
+            String(d.getMonth() + 1).padStart(2, "0") +
+            "-" +
+            String(d.getDate()).padStart(2, "0");
+          const w = Math.sin(i / 9) * 80 + (Math.random() - 0.5) * 40;
+          const all8 = 1200 + w + i * 2.2;
+          const idx = 3750 + Math.cos(i / 7) * 120 + (Math.random() - 0.5) * 60;
+          out.push({
+            date: ds,
+            all8_scale_yi: Math.round(all8 * 1000) / 1000,
+            hs300_close: Math.round(idx * 1000) / 1000,
+            top2_scale_yi: Math.round(all8 * 0.62 * 1000) / 1000,
+            other6_scale_yi: Math.round(all8 * 0.38 * 1000) / 1000,
+          });
+        }
+        return out;
+      }
+
+      function fundLabel(trend) {
+        if (trend === "up") return { text: "资金流入", icon: "🔼", cls: "text-emerald-400" };
+        if (trend === "down")
+          return { text: "资金流出", icon: "🔽", cls: "text-rose-400" };
+        return { text: "资金横盘", icon: "⏸", cls: "text-slate-400" };
+      }
+
+      function indexLabel(trend) {
+        if (trend === "up") return { text: "指数上涨", icon: "🔼", cls: "text-emerald-400" };
+        if (trend === "down")
+          return { text: "指数下跌", icon: "🔽", cls: "text-rose-400" };
+        return { text: "指数横盘", icon: "⏸", cls: "text-slate-400" };
+      }
+
+      function renderPeriodCards(periods, latestDate) {
+        const root = document.getElementById("period-cards");
+        root.innerHTML = "";
+        for (const k of PERIOD_KEYS) {
+          const p = periods[k] || {};
+          const isDiv = !!p.divergence;
+          const ok = p.sufficient !== false;
+
+          const card = document.createElement("div");
+          card.className =
+            "period-card glass-border rounded-xl p-4 shadow-card " +
+            (isDiv
+              ? "border-rose-500/50 shadow-alert ring-1 ring-rose-500/30"
+              : "border-slate-600/30 hover:shadow-cardHover");
+
+          const title = document.createElement("div");
+          title.className = "mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400";
+          title.textContent = PERIOD_LABELS[k] || k + "日";
+
+          const body = document.createElement("div");
+          body.className = "space-y-2 text-sm";
+
+          if (!ok) {
+            body.innerHTML =
+              '<p class="text-slate-500 text-xs">' +
+              (p.note || "数据不足") +
+              "</p>";
+            card.appendChild(title);
+            card.appendChild(body);
+            root.appendChild(card);
+            continue;
+          }
+
+          const f = fundLabel(p.etf_trend);
+          const ix = indexLabel(p.index_trend);
+          const statusRow = document.createElement("div");
+          statusRow.className =
+            "mt-3 flex items-center justify-between rounded-lg px-2 py-2 " +
+            (isDiv ? "bg-rose-950/50" : "bg-emerald-950/30");
+
+          const statusText = document.createElement("span");
+          statusText.className =
+            "text-xs font-bold " + (isDiv ? "text-rose-400" : "text-emerald-400");
+          statusText.textContent = isDiv ? "🚨 背离预警" : "正常";
+
+          const pct = document.createElement("span");
+          pct.className = "font-mono text-[10px] text-slate-500";
+          pct.textContent =
+            "Δ规模 " +
+            (p.etf_change_pct >= 0 ? "+" : "") +
+            p.etf_change_pct +
+            "% · Δ指数 " +
+            (p.index_change_pct >= 0 ? "+" : "") +
+            p.index_change_pct +
+            "%";
+
+          statusRow.appendChild(statusText);
+          body.innerHTML =
+            '<p class="' +
+            f.cls +
+            ' flex items-center gap-1"><span>' +
+            f.icon +
+            "</span><span>" +
+            f.text +
+            "</span></p>" +
+            '<p class="' +
+            ix.cls +
+            ' flex items-center gap-1"><span>' +
+            ix.icon +
+            "</span><span>" +
+            ix.text +
+            "</span></p>" +
+            '<p class="text-[10px] text-slate-600 mt-1">对比锚点：' +
+            (p.compare_date || "—") +
+            "</p>";
+
+          body.appendChild(statusRow);
+          body.appendChild(pct);
+
+          if (isDiv && p.label) {
+            const tip = document.createElement("p");
+            tip.className = "mt-2 text-xs text-rose-300/90 leading-snug";
+            tip.textContent = p.label;
+            body.appendChild(tip);
+          }
+
+          card.appendChild(title);
+          card.appendChild(body);
+          root.appendChild(card);
+        }
+
+        document.getElementById("header-date").textContent = latestDate || "—";
+      }
+
+      function buildChart(history) {
+        const dom = document.getElementById("main-chart");
+        const chart = echarts.init(dom, null, { renderer: "canvas" });
+        const dates = history.map((h) => h.date);
+        const etf = history.map((h) => h.all8_scale_yi);
+        const idx = history.map((h) =>
+          h.hs300_close != null && h.hs300_close !== "" ? h.hs300_close : null
+        );
+
+        chart.setOption({
+          backgroundColor: "transparent",
+          textStyle: { color: "#94a3b8" },
+          axisPointer: {
+            type: "cross",
+            crossStyle: { color: "#64748b" },
+            lineStyle: { type: "dashed", color: "#475569" },
+          },
+          tooltip: {
+            trigger: "axis",
+            backgroundColor: "rgba(15, 23, 42, 0.92)",
+            borderColor: "rgba(148, 163, 184, 0.2)",
+            textStyle: { color: "#e2e8f0" },
+            formatter: function (params) {
+              if (!params || !params.length) return "";
+              const i = params[0].dataIndex;
+              const row = history[i];
+              if (!row) return "";
+              const d = row.date;
+              const a8 = row.all8_scale_yi;
+              const ic = row.hs300_close;
+              const lines = [
+                '<div class="font-semibold text-white">' + d + "</div>",
+                '<div class="mt-1 text-sky-300">8大ETF总规模：<b>' +
+                  (a8 != null ? a8.toFixed(2) + " 亿元" : "—") +
+                  "</b></div>",
+                '<div class="text-violet-300">沪深300：<b>' +
+                  (ic != null ? ic : "—") +
+                  "</b></div>",
+              ];
+              if (row.top2_scale_yi != null) {
+                lines.push(
+                  '<div class="text-slate-400 text-xs mt-1">TOP2：' +
+                    row.top2_scale_yi.toFixed(2) +
+                    " 亿 · 其余6：" +
+                    (row.other6_scale_yi != null ? row.other6_scale_yi.toFixed(2) : "—") +
+                    " 亿</div>"
+                );
+              }
+              return lines.join("");
+            },
+          },
+          legend: {
+            data: ["ETF总规模(亿元)", "沪深300指数"],
+            textStyle: { color: "#94a3b8" },
+            top: 0,
+            right: 8,
+          },
+          grid: { left: 56, right: 56, top: 44, bottom: 72 },
+          dataZoom: [
+            {
+              type: "inside",
+              start: 50,
+              end: 100,
+            },
+            {
+              type: "slider",
+              start: 50,
+              end: 100,
+              height: 22,
+              bottom: 16,
+              borderColor: "transparent",
+              backgroundColor: "rgba(30,41,59,0.5)",
+              fillerColor: "rgba(56, 189, 248, 0.25)",
+              handleStyle: { color: "#38bdf8" },
+              textStyle: { color: "#64748b" },
+            },
+          ],
+          xAxis: {
+            type: "category",
+            boundaryGap: false,
+            data: dates,
+            axisLabel: { color: "#64748b", rotate: 32, fontSize: 10 },
+            axisLine: { lineStyle: { color: "#334155" } },
+            splitLine: { show: false },
+          },
+          yAxis: [
+            {
+              type: "value",
+              name: "ETF总规模(亿元)",
+              nameTextStyle: { color: "#64748b", fontSize: 11 },
+              axisLabel: { color: "#64748b" },
+              splitLine: { lineStyle: { color: "rgba(51, 65, 85, 0.45)" } },
+            },
+            {
+              type: "value",
+              name: "沪深300指数",
+              scale: true,
+              nameTextStyle: { color: "#64748b", fontSize: 11 },
+              axisLabel: { color: "#64748b" },
+              splitLine: { show: false },
+            },
+          ],
+          series: [
+            {
+              name: "ETF总规模(亿元)",
+              type: "line",
+              smooth: true,
+              showSymbol: history.length < 35,
+              data: etf,
+              lineStyle: { width: 2.5, color: "#38bdf8" },
+              itemStyle: { color: "#38bdf8" },
+              areaStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: "rgba(56, 189, 248, 0.35)" },
+                  { offset: 1, color: "rgba(56, 189, 248, 0.02)" },
+                ]),
+              },
+            },
+            {
+              name: "沪深300指数",
+              type: "line",
+              yAxisIndex: 1,
+              smooth: true,
+              showSymbol: history.length < 35,
+              data: idx,
+              connectNulls: false,
+              lineStyle: { width: 2.5, color: "#c084fc" },
+              itemStyle: { color: "#c084fc" },
+            },
+          ],
+        });
+
+        window.addEventListener("resize", function () {
+          chart.resize();
+        });
+      }
+
+      function applyMock() {
+        document.getElementById("data-source-hint").textContent = "演示数据（内置 Mock）";
+        document.getElementById("data-source-hint").className = "text-xs text-amber-500/80";
+        const hist = genMockHistory60();
+        renderPeriodCards(
+          MOCK_DASHBOARD.mockPeriods,
+          formatDateHeader(MOCK_DASHBOARD.meta.updated_at)
+        );
+        buildChart(hist);
+      }
+
+      function applyReal(data) {
+        document.getElementById("data-source-hint").textContent = "data.json 实时数据";
+        document.getElementById("data-source-hint").className = "text-xs text-emerald-500/80";
+        const hist = data.history || [];
+        const latest = hist[hist.length - 1];
+        const periods = (latest && latest.periods) || {};
+        renderPeriodCards(
+          periods,
+          formatDateHeader(data.meta && data.meta.updated_at)
+        );
+        buildChart(hist);
+      }
+
+      async function init() {
+        try {
+          const res = await fetch("data.json", { cache: "no-store" });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.history && data.history.length > 0) {
+              applyReal(data);
+              return;
+            }
+          }
+        } catch (e) {
+          /* 本地 file:// 或缺失文件 → Mock */
+        }
+        applyMock();
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>
