@@ -10,9 +10,9 @@
 
 输出：
 - etf_scale_history.csv：分项与合计（亿元）
-- data.json：供 GitHub Pages 可视化；含历史序列、各周期趋势与背离标记（保留约 2 年）
+- data.json：供 GitHub Pages 可视化；含规模(亿)、总份额(亿份)、各周期「份额 vs 指数」背离（保留约 2 年）
 
-若某路接口失败，不中断程序；规模缺失时用上一日 JSON 中的分项前值，再无则按 0 计。
+若某路接口失败，不中断程序；规模/份额缺失时优先沿用上日 JSON 分项，再无则份额可按规模估算或置 0。
 """
 
 from __future__ import annotations
@@ -67,6 +67,9 @@ TREND_EPS_PCT = 0.02
 # data.json 最多保留交易日/记录条数（约 2 年按自然日上限）
 MAX_HISTORY_RECORDS = 800
 HS300_SYMBOL = "sh000300"
+
+# CSV 引导时无份额列：用「规模(亿)/近似净值」估算亿份，仅用于历史 periods 连贯性
+NAV_PROXY_YUAN_FOR_SHARES_ESTIMATE: float = 4.28
 
 # 历史 CSV 曾为三列（无分项）；检测到旧表头时自动迁移为「8 只分项 + 合计」宽表
 OLD_CSV_HEADER = ["日期", "前两只规模合计", "八只规模合计"]
@@ -222,6 +225,19 @@ def _scale_yuan_from_spot_row(
     return float("nan"), ""
 
 
+def _shares_fen_from_spot_row(row: pd.Series, state: FetchState, code: str) -> float:
+    """
+    东方财富「最新份额」字段（f38）：一般为基金总份额，单位「份」。
+    异常或缺失时返回 nan，由上层决定是否用交易所补数。
+    """
+    sh = _row_to_float(row, "最新份额")
+    if sh > 0:
+        return sh
+    if not pd.isna(sh) and sh <= 0:
+        state.add_warn(f"{code}: 行情表最新份额为非正数，已忽略")
+    return float("nan")
+
+
 def _prepare_spot_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "代码" not in df.columns:
@@ -253,17 +269,22 @@ def _fetch_szse_shares(state: FetchState) -> Optional[pd.DataFrame]:
     return _safe_call("深交所 ETF 份额", _fn, state)
 
 
-def _fill_exchange_shares(
+def _fill_exchange_scale_and_shares(
     spot_df: Optional[pd.DataFrame],
     state: FetchState,
-) -> Dict[str, float]:
+    need_scale: List[str],
+    need_shares: List[str],
+) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    从交易所接口取「基金份额」，再结合行情「最新价」换算为元。
-    返回: code -> 规模(元)
+    从深交所/上交所取「基金份额」（份），可选换算为规模（元）。
+    返回:
+      scale_yuan: 仅对 need_scale 中且能拿到净值×份额 的代码填充
+      shares_fen: 对 need_shares（及规模侧需要时同一 vol）填充 份
     """
-    result: Dict[str, float] = {}
+    scale_out: Dict[str, float] = {}
+    shares_out: Dict[str, float] = {}
     if spot_df is None or "代码" not in spot_df.columns:
-        return result
+        return scale_out, shares_out
 
     sdf = _prepare_spot_df(spot_df)
     px_map: Dict[str, float] = {}
@@ -273,31 +294,36 @@ def _fill_exchange_shares(
         if p > 0:
             px_map[c] = p
 
-    need = [t.code for t in TARGET_ETFS]
+    need_sz = [c for c in need_scale + need_shares if c in ("159919", "159925")]
+    need_sz = list(dict.fromkeys(need_sz))
+    sh_targets = [t.code for t in TARGET_ETFS if t.exchange == "SH"]
+    need_sh = [c for c in need_scale + need_shares if c in sh_targets]
+    need_sh = list(dict.fromkeys(need_sh))
 
-    # 深交所
     sz_df = _fetch_szse_shares(state)
     if sz_df is not None and not sz_df.empty and "基金代码" in sz_df.columns:
         tdf = sz_df.copy()
         tdf["_c"] = tdf["基金代码"].map(_norm_code)
-        for code in need:
-            if code not in ("159919", "159925"):
-                continue
+        for code in need_sz:
             sub = tdf[tdf["_c"] == code]
             if sub.empty:
                 continue
-            vol = pd.to_numeric(sub.iloc[0].get("基金份额"), errors="coerce")
-            if vol is None or pd.isna(vol) or float(vol) <= 0:
+            try:
+                vol = float(pd.to_numeric(sub.iloc[0].get("基金份额"), errors="coerce"))
+            except (TypeError, ValueError):
                 continue
-            px = px_map.get(code, float("nan"))
-            if px > 0:
-                result[code] = float(vol) * px
-            else:
-                state.add_warn(f"{code}: 有深交所份额但缺少行情最新价，无法折元")
+            if vol <= 0 or pd.isna(vol):
+                continue
+            if code in need_shares:
+                shares_out[code] = vol
+            if code in need_scale:
+                px = px_map.get(code, float("nan"))
+                if px > 0:
+                    scale_out[code] = vol * px
+                else:
+                    state.add_warn(f"{code}: 有深交所份额但缺少行情最新价，无法折规模(元)")
 
-    # 上交所：按日期回退
     today = datetime.now().date()
-    sh_targets = [t.code for t in TARGET_ETFS if t.exchange == "SH"]
     for delta in range(0, 15):
         d = today - timedelta(days=delta)
         ds = d.strftime("%Y%m%d")
@@ -306,32 +332,52 @@ def _fill_exchange_shares(
             continue
         tdf = sse_df.copy()
         tdf["_c"] = tdf["基金代码"].map(_norm_code)
-        for code in sh_targets:
-            if code in result:
+        for code in need_sh:
+            need_s = code in need_shares and code not in shares_out
+            need_sc = code in need_scale and code not in scale_out
+            if not need_s and not need_sc:
                 continue
             sub = tdf[tdf["_c"] == code]
             if sub.empty:
                 continue
-            vol = pd.to_numeric(sub.iloc[0].get("基金份额"), errors="coerce")
-            if vol is None or pd.isna(vol) or float(vol) <= 0:
+            try:
+                vol = float(pd.to_numeric(sub.iloc[0].get("基金份额"), errors="coerce"))
+            except (TypeError, ValueError):
                 continue
-            px = px_map.get(code, float("nan"))
-            if px > 0:
-                result[code] = float(vol) * px
-                state.add_warn(
-                    f"{code}: 使用上交所披露份额×最新价 估算规模 (统计日 {ds})"
-                )
-    return result
+            if vol <= 0 or pd.isna(vol):
+                continue
+            if need_s:
+                shares_out[code] = vol
+            if need_sc:
+                px = px_map.get(code, float("nan"))
+                if px > 0:
+                    scale_out[code] = vol * px
+                    state.add_warn(
+                        f"{code}: 使用上交所披露份额×最新价 估算规模 (统计日 {ds})"
+                    )
+        still_sh = any(
+            (c in need_shares and c not in shares_out)
+            or (c in need_scale and c not in scale_out)
+            for c in need_sh
+        )
+        if not still_sh:
+            break
+
+    return scale_out, shares_out
 
 
-def _collect_scales(state: FetchState) -> Tuple[Dict[str, float], Dict[str, str]]:
+def _collect_scales_and_shares(
+    state: FetchState,
+) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float]]:
     """
     返回:
       scale_yuan: 基金代码 -> 规模(元)
       detail: 基金代码 -> 口径说明（打印用）
+      shares_fen: 基金代码 -> 总份额(份)；缺失则为该代码无键
     """
     scale_yuan: Dict[str, float] = {}
     detail: Dict[str, str] = {}
+    shares_fen: Dict[str, float] = {}
 
     raw_spot = _fetch_eastmoney_etf_spot_df(state)
     spot_df = _prepare_spot_df(raw_spot) if raw_spot is not None else None
@@ -341,23 +387,32 @@ def _collect_scales(state: FetchState) -> Tuple[Dict[str, float], Dict[str, str]
             sub = spot_df[spot_df["_code"] == t.code]
             if sub.empty:
                 continue
-            yuan, desc = _scale_yuan_from_spot_row(sub.iloc[0], state, t.code)
+            row = sub.iloc[0]
+            yuan, desc = _scale_yuan_from_spot_row(row, state, t.code)
             if not pd.isna(yuan) and yuan > 0:
                 scale_yuan[t.code] = yuan
                 detail[t.code] = desc
+            sf = _shares_fen_from_spot_row(row, state, t.code)
+            if not pd.isna(sf) and sf > 0:
+                shares_fen[t.code] = sf
     else:
         state.add_warn("东方财富 ETF 行情表不可用或为空")
 
-    # 对仍未取到的代码，尝试交易所份额 × 行情价
-    missing = [t.code for t in TARGET_ETFS if t.code not in scale_yuan]
-    if missing:
-        ex_map = _fill_exchange_shares(raw_spot, state)
-        for c in missing:
-            if c in ex_map and ex_map[c] > 0:
-                scale_yuan[c] = ex_map[c]
+    missing_scale = [t.code for t in TARGET_ETFS if t.code not in scale_yuan]
+    missing_shares = [t.code for t in TARGET_ETFS if t.code not in shares_fen]
+    if missing_scale or missing_shares:
+        s_add, f_add = _fill_exchange_scale_and_shares(
+            raw_spot, state, missing_scale, missing_shares
+        )
+        for c, v in s_add.items():
+            if v > 0 and c not in scale_yuan:
+                scale_yuan[c] = v
                 detail[c] = detail.get(c, "交易所份额×最新价(元)")
+        for c, v in f_add.items():
+            if v > 0 and c not in shares_fen:
+                shares_fen[c] = v
 
-    return scale_yuan, detail
+    return scale_yuan, detail, shares_fen
 
 
 def _parse_iso_date(s: str) -> datetime.date:
@@ -458,6 +513,78 @@ def _forward_fill_scales_yuan(
     return out
 
 
+def _forward_fill_shares_fen(
+    shares_fen: Dict[str, float],
+    prev_per_code_shares_yi: Optional[Dict[str, Any]],
+    scale_yuan: Dict[str, float],
+    state: FetchState,
+) -> Dict[str, float]:
+    """缺失份额优先沿用上日 JSON 亿份折算为份；再无则按规模÷近似净值估算；最后置 0。"""
+    out = dict(shares_fen)
+    prev = prev_per_code_shares_yi or {}
+    nav = float(NAV_PROXY_YUAN_FOR_SHARES_ESTIMATE)
+    if nav <= 0:
+        nav = 4.28
+    for t in TARGET_ETFS:
+        c = t.code
+        if c in out and out[c] > 0:
+            continue
+        py = prev.get(c)
+        if py is not None and str(py).strip() != "":
+            try:
+                v = float(py)
+                if v > 0:
+                    out[c] = v * 1e8
+                    state.add_warn(f"{c}: 本日份额抓取失败，沿用上日 JSON 份额 {v:.4f} 亿份")
+                    continue
+            except (TypeError, ValueError):
+                pass
+        sc = float(scale_yuan.get(c, 0.0) or 0.0)
+        if sc > 0:
+            out[c] = sc / nav
+            state.add_warn(
+                f"{c}: 无有效份额，按规模÷近似净值({nav}) 估算份额（份）"
+            )
+            continue
+        out[c] = 0.0
+        state.add_warn(f"{c}: 无有效份额，按 0 计入汇总")
+    return out
+
+
+def _all8_shares_yi_from_record(rec: Dict[str, Any]) -> Optional[float]:
+    """从一条 history 记录解析 8 只总份额（亿份）；兼容仅有规模的老数据。"""
+    raw = rec.get("all8_shares_yi")
+    try:
+        if raw is not None and str(raw).strip() != "":
+            v = float(raw)
+            if v > 0:
+                return v
+    except (TypeError, ValueError):
+        pass
+    d = rec.get("etf_per_code_shares_yi")
+    if isinstance(d, dict) and d:
+        s = 0.0
+        for t in TARGET_ETFS:
+            try:
+                s += float(d.get(t.code, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        if s > 0:
+            return s
+    nav = float(NAV_PROXY_YUAN_FOR_SHARES_ESTIMATE)
+    if nav <= 0:
+        nav = 4.28
+    try:
+        sc = rec.get("all8_scale_yi")
+        if sc is not None and str(sc).strip() != "":
+            v = float(sc)
+            if v > 0:
+                return v / nav
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def _find_past_record(
     history: List[Dict[str, Any]], target_idx: int, ref_date: datetime.date
 ) -> Optional[Dict[str, Any]]:
@@ -484,7 +611,7 @@ def _compute_periods_for_index(
     history: List[Dict[str, Any]], target_idx: int
 ) -> Dict[str, Any]:
     """
-    以 history[target_idx] 为「当前日」，对各周期计算 ETF 8 只总规模 vs 沪深300 的涨跌幅与背离。
+    以 history[target_idx] 为「当前日」，对各周期计算 8 只 ETF 总份额 vs 沪深300 的涨跌幅与背离。
     """
     out: Dict[str, Any] = {}
     if target_idx < 0 or target_idx >= len(history):
@@ -495,13 +622,12 @@ def _compute_periods_for_index(
     except (ValueError, KeyError, TypeError):
         return out
 
-    cur_etf = cur.get("all8_scale_yi")
+    cur_etf_f = _all8_shares_yi_from_record(cur)
     cur_idx = cur.get("hs300_close")
     try:
-        cur_etf_f = float(cur_etf) if cur_etf is not None else float("nan")
         cur_idx_f = float(cur_idx) if cur_idx is not None else float("nan")
     except (TypeError, ValueError):
-        return out
+        cur_idx_f = float("nan")
 
     for n in PERIODS_DAYS:
         key = str(n)
@@ -514,14 +640,14 @@ def _compute_periods_for_index(
                 "note": "历史长度不足或缺少对比日",
             }
             continue
+        p_etf = _all8_shares_yi_from_record(past)
         try:
-            p_etf = float(past.get("all8_scale_yi"))
             p_idx = float(past.get("hs300_close"))
         except (TypeError, ValueError):
             out[key] = {"sufficient": False, "days": n, "note": "对比日数值无效"}
             continue
-        if p_etf <= 0 or cur_etf_f <= 0:
-            out[key] = {"sufficient": False, "days": n, "note": "ETF规模无效"}
+        if p_etf is None or cur_etf_f is None or p_etf <= 0 or cur_etf_f <= 0:
+            out[key] = {"sufficient": False, "days": n, "note": "ETF总份额无效或缺失"}
             continue
         if p_idx <= 0 or cur_idx_f <= 0 or (cur_idx_f != cur_idx_f):
             out[key] = {"sufficient": False, "days": n, "note": "指数收盘价无效"}
@@ -533,11 +659,11 @@ def _compute_periods_for_index(
         idx_tr = _trend_from_pct(idx_pct)
         div = (etf_tr == "up" and idx_tr == "down") or (etf_tr == "down" and idx_tr == "up")
         if etf_tr == "up" and idx_tr == "down":
-            div_type = "scale_up_index_down"
-            label = "规模↑ 指数↓（资金与指数背离）"
+            div_type = "share_up_index_down"
+            label = "份额↑ 指数↓（申赎/资金与指数背离）"
         elif etf_tr == "down" and idx_tr == "up":
-            div_type = "scale_down_index_up"
-            label = "规模↓ 指数↑（资金与指数背离）"
+            div_type = "share_down_index_up"
+            label = "份额↓ 指数↑（申赎/资金与指数背离）"
         else:
             div_type = "none"
             label = "无背离"
@@ -609,6 +735,16 @@ def _bootstrap_history_from_csv(
                 ic = px_map.get(date_s[:10])
                 if ic is None:
                     ic = None
+                nav = float(NAV_PROXY_YUAN_FOR_SHARES_ESTIMATE)
+                if nav <= 0:
+                    nav = 4.28
+                per_sh = {
+                    k: round((v / nav) if v and v > 0 else 0.0, 6)
+                    for k, v in per.items()
+                }
+                top2_sh = sum(per_sh[c] for c in TOP_TWO_CODES)
+                all8_sh = sum(per_sh[t.code] for t in TARGET_ETFS)
+                other6_sh = all8_sh - top2_sh
                 out_list.append(
                     {
                         "date": date_s[:10],
@@ -616,7 +752,11 @@ def _bootstrap_history_from_csv(
                         "top2_scale_yi": round(top2, 6),
                         "all8_scale_yi": round(all8, 6),
                         "other6_scale_yi": round(other6, 6),
+                        "all8_shares_yi": round(all8_sh, 6),
+                        "top2_shares_yi": round(top2_sh, 6),
+                        "other6_shares_yi": round(other6_sh, 6),
                         "etf_per_code_yi": {k: round(v, 6) for k, v in per.items()},
+                        "etf_per_code_shares_yi": per_sh,
                         "periods": {},
                     }
                 )
@@ -636,21 +776,33 @@ def _bootstrap_history_from_csv(
 def _build_today_record(
     run_date: str,
     scale_yuan: Dict[str, float],
+    shares_fen: Dict[str, float],
     hs300_close: Optional[float],
     state: FetchState,
 ) -> Dict[str, Any]:
     """组装当日写入 JSON 的基础字段（不含 periods）。"""
     per_yi = {t.code: round(_yuan_to_yi(scale_yuan.get(t.code, 0.0)), 6) for t in TARGET_ETFS}
+    per_shares_yi = {
+        t.code: round(float(shares_fen.get(t.code, 0.0) or 0.0) / 1e8, 6)
+        for t in TARGET_ETFS
+    }
     top2_yi = sum(per_yi[c] for c in TOP_TWO_CODES)
     all8_yi = sum(per_yi[t.code] for t in TARGET_ETFS)
     other6_yi = all8_yi - top2_yi
+    top2_sh = sum(per_shares_yi[c] for c in TOP_TWO_CODES)
+    all8_sh = sum(per_shares_yi[t.code] for t in TARGET_ETFS)
+    other6_sh = all8_sh - top2_sh
     return {
         "date": run_date,
         "hs300_close": round(float(hs300_close), 4) if hs300_close is not None else None,
         "top2_scale_yi": round(top2_yi, 6),
         "all8_scale_yi": round(all8_yi, 6),
         "other6_scale_yi": round(other6_yi, 6),
+        "all8_shares_yi": round(all8_sh, 6),
+        "top2_shares_yi": round(top2_sh, 6),
+        "other6_shares_yi": round(other6_sh, 6),
         "etf_per_code_yi": per_yi,
+        "etf_per_code_shares_yi": per_shares_yi,
         "periods": {},
     }
 
@@ -768,10 +920,14 @@ def run() -> None:
     if not payload.get("history"):
         payload["history"] = _bootstrap_history_from_csv(state)
 
-    raw_scale_yuan, detail = _collect_scales(state)
+    raw_scale_yuan, detail, raw_shares_fen = _collect_scales_and_shares(state)
     last = payload["history"][-1] if payload["history"] else None
     prev_yi = (last or {}).get("etf_per_code_yi") or {}
+    prev_shares_yi = (last or {}).get("etf_per_code_shares_yi") or {}
     scale_yuan = _forward_fill_scales_yuan(raw_scale_yuan, prev_yi, state)
+    shares_fen = _forward_fill_shares_fen(
+        raw_shares_fen, prev_shares_yi, scale_yuan, state
+    )
 
     hs300_close = _fetch_hs300_latest_close(state)
     if hs300_close is None and last is not None:
@@ -784,7 +940,9 @@ def run() -> None:
             pass
 
     run_date = datetime.now().strftime("%Y-%m-%d")
-    today_rec = _build_today_record(run_date, scale_yuan, hs300_close, state)
+    today_rec = _build_today_record(
+        run_date, scale_yuan, shares_fen, hs300_close, state
+    )
     _merge_history_record(payload, today_rec)
     hi = len(payload["history"]) - 1
     payload["history"][hi]["periods"] = _compute_periods_for_index(payload["history"], hi)
@@ -804,6 +962,16 @@ def run() -> None:
         else:
             print(f"  {t.code} {t.name}: {yi:.4f} 亿元 (无数据，按0)")
 
+    print("\n【各基金份额】（单位：亿份）")
+    for t in TARGET_ETFS:
+        sy = shares_fen.get(t.code, 0.0) / 1e8
+        if t.code in raw_shares_fen:
+            print(f"  {t.code} {t.name}: {sy:.4f} 亿份 (行情或交易所披露)")
+        elif sy > 0:
+            print(f"  {t.code} {t.name}: {sy:.4f} 亿份 (沿用或按规模估算)")
+        else:
+            print(f"  {t.code} {t.name}: {sy:.4f} 亿份 (无数据，按0)")
+
     print("\n【分项汇总】")
     print(
         f"  其余 6 只合计 (8 只总和 - 前两只): {row['other6_scale_yi']:.4f} 亿元"
@@ -816,7 +984,16 @@ def run() -> None:
     ic = row.get("hs300_close")
     print(f"  沪深300 (sh000300) 收盘: {ic if ic is not None else '缺失'}")
 
-    print("\n【多周期资金 vs 指数】（日历日回溯，对比日见各条 compare_date）")
+    print("\n【份额合计】（单位：亿份）")
+    print(
+        f"  华泰柏瑞(510300) + 易方达(510310) 合计: {row['top2_shares_yi']:.4f} 亿份"
+    )
+    print(f"  全部 8 只合计: {row['all8_shares_yi']:.4f} 亿份")
+    print(
+        f"  其余 6 只合计: {row['other6_shares_yi']:.4f} 亿份"
+    )
+
+    print("\n【多周期份额 vs 指数】（日历日回溯，对比日见各条 compare_date）")
     periods = row.get("periods") or {}
     for n in PERIODS_DAYS:
         p = periods.get(str(n), {})
@@ -825,7 +1002,7 @@ def run() -> None:
             continue
         flag = " *** 背离 *** " if p.get("divergence") else ""
         print(
-            f"  {n} 日: ETF {p.get('etf_change_pct')}% ({p.get('etf_trend')}), "
+            f"  {n} 日: 份额 {p.get('etf_change_pct')}% ({p.get('etf_trend')}), "
             f"指数 {p.get('index_change_pct')}% ({p.get('index_trend')}) "
             f"vs {p.get('compare_date')}{flag}"
         )
