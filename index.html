@@ -41,6 +41,14 @@
     .period-card:hover {
       transform: translateY(-2px) scale(1.02);
     }
+    /* 多周期卡片点击态 */
+    .period-card:active {
+      transform: translateY(0) scale(0.98);
+    }
+    .period-card.cursor-pointer:focus-visible {
+      outline: 2px solid rgba(56, 189, 248, 0.6);
+      outline-offset: 2px;
+    }
     .chart-shell {
       transition: box-shadow 0.25s ease;
     }
@@ -107,11 +115,21 @@
   <main class="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-8">
     <!-- ========== 多周期预警卡片（Mock + 可切换真实 data.json）========== -->
     <section class="mb-8">
-      <div class="mb-4 flex items-end justify-between gap-2">
+      <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
           多周期状态
         </h2>
-        <span id="data-source-hint" class="text-xs text-slate-600">演示数据</span>
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- 历史明细：打开表格模态框 -->
+          <button
+            id="btn-open-table"
+            type="button"
+            class="rounded-lg border border-slate-600/60 bg-slate-800/50 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-700/60 hover:text-white active:scale-95"
+          >
+            📊 查看明细数据
+          </button>
+          <span id="data-source-hint" class="text-xs text-slate-600">演示数据</span>
+        </div>
       </div>
       <div
         id="period-cards"
@@ -131,6 +149,48 @@
     </section>
   </main>
 
+  <!-- ========== 历史明细模态框（玻璃态 + 暗色表格）========== -->
+  <div
+    id="history-modal"
+    class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="history-modal-title"
+  >
+    <div
+      class="glass-border relative flex max-h-[85vh] w-full max-w-5xl flex-col rounded-2xl border border-slate-600/40 shadow-2xl"
+    >
+      <div
+        class="flex shrink-0 items-center justify-between gap-3 border-b border-slate-600/30 px-4 py-3 md:px-5"
+      >
+        <h3 id="history-modal-title" class="text-sm font-semibold text-white md:text-base">
+          历史明细数据
+        </h3>
+        <button
+          id="btn-close-modal"
+          type="button"
+          class="rounded-lg border border-slate-600/50 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-rose-500/40 hover:text-rose-200 active:scale-95"
+        >
+          关闭
+        </button>
+      </div>
+      <div class="min-h-0 flex-1 overflow-auto px-2 pb-4 pt-2 md:px-4">
+        <table class="w-full border-collapse text-left text-xs text-slate-300 md:text-sm">
+          <thead class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur">
+            <tr class="border-b border-slate-600/50 text-slate-400">
+              <th class="whitespace-nowrap px-2 py-2.5 font-semibold md:px-3">日期</th>
+              <th class="whitespace-nowrap px-2 py-2.5 font-semibold md:px-3">8大ETF总规模(亿)</th>
+              <th class="whitespace-nowrap px-2 py-2.5 font-semibold md:px-3">沪深300收盘价</th>
+              <th class="whitespace-nowrap px-2 py-2.5 font-semibold md:px-3">TOP2规模(亿)</th>
+              <th class="whitespace-nowrap px-2 py-2.5 font-semibold md:px-3">其余6只规模(亿)</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       const PERIOD_KEYS = ["1", "5", "13", "30", "60"];
@@ -140,6 +200,24 @@
         13: "13日短线趋势",
         30: "30日中线",
         60: "60日波段",
+      };
+
+      // ---------- 全局状态：图表实例、当前序列、卡片用的周期数据、均线选中 ----------
+      let chartInstance = null;
+      let currentHistory = [];
+      let uiPeriods = {};
+      let uiLatestDate = "";
+      /** @type {Set<string>} 选中的均线周期键，如 "1","5" */
+      const activeMAs = new Set();
+      let resizeBound = false;
+
+      /** 各周期均线描边颜色（与主轴蓝/紫区分；60 日为实线，其余虚线） */
+      const MA_STYLE = {
+        1: { color: "#facc15" },
+        5: { color: "#4ade80" },
+        13: { color: "#fb923c" },
+        30: { color: "#e879f9" },
+        60: { color: "#2dd4bf" },
       };
 
       /**
@@ -248,20 +326,334 @@
         return { text: "指数横盘", icon: "⏸", cls: "text-slate-400" };
       }
 
+      /**
+       * 简单移动平均 SMA：对 all8_scale_yi 序列计算 N 日均线；前 N-1 个点为 null（图表不连线）
+       */
+      function computeSMA(values, n) {
+        const out = [];
+        const len = values.length;
+        for (let i = 0; i < len; i++) {
+          if (i < n - 1) {
+            out.push(null);
+            continue;
+          }
+          let sum = 0;
+          for (let j = 0; j < n; j++) {
+            sum += values[i - j];
+          }
+          out.push(sum / n);
+        }
+        return out;
+      }
+
+      /** 构建均线 series（左轴，细虚线，无 area） */
+      function buildMASeriesList(history) {
+        const etfNums = history.map((h) => Number(h.all8_scale_yi));
+        const list = [];
+        const sortedKeys = PERIOD_KEYS.filter((k) => activeMAs.has(k));
+        sortedKeys.sort((a, b) => Number(a) - Number(b));
+        for (const k of sortedKeys) {
+          const n = parseInt(k, 10);
+          if (history.length < n || n < 1) continue;
+          const sma = computeSMA(etfNums, n);
+          const st = MA_STYLE[k] || { color: "#94a3b8" };
+          const lineType = k === "60" ? "solid" : "dashed";
+          list.push({
+            name: "MA" + k + "(总规模)",
+            type: "line",
+            yAxisIndex: 0,
+            data: sma,
+            smooth: true,
+            showSymbol: false,
+            connectNulls: false,
+            lineStyle: {
+              width: 1.2,
+              type: lineType,
+              color: st.color,
+            },
+            itemStyle: { color: st.color },
+            emphasis: { focus: "series" },
+            z: 5,
+          });
+        }
+        return list;
+      }
+
+      /** 图例名称列表 */
+      function buildLegendData() {
+        const base = ["ETF总规模(亿元)", "沪深300指数"];
+        const mas = PERIOD_KEYS.filter((k) => activeMAs.has(k))
+          .sort((a, b) => Number(a) - Number(b))
+          .map((k) => "MA" + k + "(总规模)");
+        return base.concat(mas);
+      }
+
+      /** 组装完整 ECharts option（首次初始化） */
+      function buildFullChartOption(history) {
+        const dates = history.map((h) => h.date);
+        const etf = history.map((h) => h.all8_scale_yi);
+        const idx = history.map((h) =>
+          h.hs300_close != null && h.hs300_close !== "" ? h.hs300_close : null
+        );
+        const maSeries = buildMASeriesList(history);
+
+        return {
+          backgroundColor: "transparent",
+          textStyle: { color: "#94a3b8" },
+          axisPointer: {
+            type: "cross",
+            crossStyle: { color: "#64748b" },
+            lineStyle: { type: "dashed", color: "#475569" },
+          },
+          tooltip: {
+            trigger: "axis",
+            backgroundColor: "rgba(15, 23, 42, 0.92)",
+            borderColor: "rgba(148, 163, 184, 0.2)",
+            textStyle: { color: "#e2e8f0" },
+            formatter: function (params) {
+              if (!params || !params.length) return "";
+              const i = params[0].dataIndex;
+              const row = history[i];
+              if (!row) return "";
+              function fmtSeriesVal(name, v) {
+                if (v == null || v === "" || (typeof v === "number" && isNaN(v)))
+                  return "—";
+                if (typeof v !== "number") return String(v);
+                if (name.indexOf("沪深300") >= 0) return v.toFixed(3);
+                return v.toFixed(2) + " 亿";
+              }
+              const lines = [
+                '<div class="font-semibold text-white">' + row.date + "</div>",
+              ];
+              params.forEach(function (p) {
+                const color =
+                  p.seriesName.indexOf("MA") === 0
+                    ? "#fde047"
+                    : p.seriesName.indexOf("沪深") >= 0
+                      ? "#d8b4fe"
+                      : "#7dd3fc";
+                lines.push(
+                  '<div class="mt-0.5" style="color:' +
+                    color +
+                    '">' +
+                    p.marker +
+                    " " +
+                    p.seriesName +
+                    ": <b>" +
+                    fmtSeriesVal(p.seriesName, p.data) +
+                    "</b></div>"
+                );
+              });
+              if (row.top2_scale_yi != null) {
+                lines.push(
+                  '<div class="text-slate-400 text-xs mt-1 border-t border-slate-600/50 pt-1">TOP2：' +
+                    row.top2_scale_yi.toFixed(2) +
+                    " 亿 · 其余6：" +
+                    (row.other6_scale_yi != null ? row.other6_scale_yi.toFixed(2) : "—") +
+                    " 亿</div>"
+                );
+              }
+              return lines.join("");
+            },
+          },
+          legend: {
+            data: buildLegendData(),
+            textStyle: { color: "#94a3b8" },
+            top: 0,
+            right: 8,
+            type: "scroll",
+          },
+          grid: { left: 56, right: 56, top: 44, bottom: 72 },
+          dataZoom: [
+            { type: "inside", start: 50, end: 100 },
+            {
+              type: "slider",
+              start: 50,
+              end: 100,
+              height: 22,
+              bottom: 16,
+              borderColor: "transparent",
+              backgroundColor: "rgba(30,41,59,0.5)",
+              fillerColor: "rgba(56, 189, 248, 0.25)",
+              handleStyle: { color: "#38bdf8" },
+              textStyle: { color: "#64748b" },
+            },
+          ],
+          xAxis: {
+            type: "category",
+            boundaryGap: false,
+            data: dates,
+            axisLabel: { color: "#64748b", rotate: 32, fontSize: 10 },
+            axisLine: { lineStyle: { color: "#334155" } },
+            splitLine: { show: false },
+          },
+          yAxis: [
+            {
+              type: "value",
+              name: "ETF总规模(亿元)",
+              nameTextStyle: { color: "#64748b", fontSize: 11 },
+              axisLabel: { color: "#64748b" },
+              splitLine: { lineStyle: { color: "rgba(51, 65, 85, 0.45)" } },
+            },
+            {
+              type: "value",
+              name: "沪深300指数",
+              scale: true,
+              nameTextStyle: { color: "#64748b", fontSize: 11 },
+              axisLabel: { color: "#64748b" },
+              splitLine: { show: false },
+            },
+          ],
+          series: [
+            {
+              name: "ETF总规模(亿元)",
+              type: "line",
+              smooth: true,
+              showSymbol: history.length < 35,
+              data: etf,
+              lineStyle: { width: 2.5, color: "#38bdf8" },
+              itemStyle: { color: "#38bdf8" },
+              z: 2,
+              areaStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: "rgba(56, 189, 248, 0.35)" },
+                  { offset: 1, color: "rgba(56, 189, 248, 0.02)" },
+                ]),
+              },
+            },
+            {
+              name: "沪深300指数",
+              type: "line",
+              yAxisIndex: 1,
+              smooth: true,
+              showSymbol: history.length < 35,
+              data: idx,
+              connectNulls: false,
+              lineStyle: { width: 2.5, color: "#c084fc" },
+              itemStyle: { color: "#c084fc" },
+              z: 2,
+            },
+          ].concat(maSeries),
+        };
+      }
+
+      function bindResizeOnce() {
+        if (resizeBound) return;
+        resizeBound = true;
+        window.addEventListener("resize", function () {
+          if (chartInstance) chartInstance.resize();
+        });
+      }
+
+      /** 仅更新均线相关 series + legend（不销毁图表，保留缩放状态） */
+      function updateChartMAs() {
+        if (!chartInstance || !currentHistory.length) return;
+        const etf = currentHistory.map((h) => h.all8_scale_yi);
+        const idx = currentHistory.map((h) =>
+          h.hs300_close != null && h.hs300_close !== "" ? h.hs300_close : null
+        );
+        const maSeries = buildMASeriesList(currentHistory);
+        const baseSeries = [
+          {
+            name: "ETF总规模(亿元)",
+            type: "line",
+            smooth: true,
+            showSymbol: currentHistory.length < 35,
+            data: etf,
+            lineStyle: { width: 2.5, color: "#38bdf8" },
+            itemStyle: { color: "#38bdf8" },
+            z: 2,
+            areaStyle: {
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: "rgba(56, 189, 248, 0.35)" },
+                { offset: 1, color: "rgba(56, 189, 248, 0.02)" },
+              ]),
+            },
+          },
+          {
+            name: "沪深300指数",
+            type: "line",
+            yAxisIndex: 1,
+            smooth: true,
+            showSymbol: currentHistory.length < 35,
+            data: idx,
+            connectNulls: false,
+            lineStyle: { width: 2.5, color: "#c084fc" },
+            itemStyle: { color: "#c084fc" },
+            z: 2,
+          },
+        ];
+        chartInstance.setOption(
+          {
+            legend: { data: buildLegendData() },
+            series: baseSeries.concat(maSeries),
+          },
+          { replaceMerge: ["series"] }
+        );
+      }
+
+      function buildChart(history) {
+        currentHistory = history.slice();
+        const dom = document.getElementById("main-chart");
+        if (chartInstance) {
+          chartInstance.dispose();
+          chartInstance = null;
+        }
+        chartInstance = echarts.init(dom, null, { renderer: "canvas" });
+        chartInstance.setOption(buildFullChartOption(currentHistory));
+        bindResizeOnce();
+      }
+
+      /** 点击周期卡片：切换均线显示 */
+      function onPeriodCardClick(periodKey) {
+        if (activeMAs.has(periodKey)) activeMAs.delete(periodKey);
+        else activeMAs.add(periodKey);
+        renderPeriodCards(uiPeriods, uiLatestDate);
+        updateChartMAs();
+      }
+
+      /**
+       * 渲染多周期预警卡片；可点击切换对应 N 日均线叠加
+       */
       function renderPeriodCards(periods, latestDate) {
+        uiPeriods = periods || {};
+        uiLatestDate = latestDate || "";
         const root = document.getElementById("period-cards");
         root.innerHTML = "";
         for (const k of PERIOD_KEYS) {
-          const p = periods[k] || {};
+          const p = uiPeriods[k] || {};
           const isDiv = !!p.divergence;
           const ok = p.sufficient !== false;
+          const maOn = activeMAs.has(k);
 
           const card = document.createElement("div");
+          card.setAttribute("role", "button");
+          card.setAttribute("tabindex", "0");
+          card.dataset.period = k;
+          card.title = "点击叠加/取消 MA" + k + "（基于 ETF 总规模）";
+
+          /* 选中均线：天蓝高亮环；未选中且背离：玫瑰色弱环 */
+          let borderRing = "border-slate-600/30 hover:shadow-cardHover ";
+          if (maOn) {
+            borderRing =
+              "border-sky-500/40 shadow-cardHover ring-2 ring-sky-400 ring-offset-2 ring-offset-[#0a0f1a] ";
+          } else if (isDiv) {
+            borderRing = "border-rose-500/50 shadow-alert ring-1 ring-rose-500/30 ";
+          }
+
           card.className =
-            "period-card glass-border rounded-xl p-4 shadow-card " +
-            (isDiv
-              ? "border-rose-500/50 shadow-alert ring-1 ring-rose-500/30"
-              : "border-slate-600/30 hover:shadow-cardHover");
+            "period-card cursor-pointer select-none glass-border rounded-xl p-4 shadow-card " +
+            borderRing;
+
+          card.addEventListener("click", function () {
+            onPeriodCardClick(k);
+          });
+          card.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              onPeriodCardClick(k);
+            }
+          });
 
           const title = document.createElement("div");
           title.className = "mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400";
@@ -342,144 +734,73 @@
         document.getElementById("header-date").textContent = latestDate || "—";
       }
 
-      function buildChart(history) {
-        const dom = document.getElementById("main-chart");
-        const chart = echarts.init(dom, null, { renderer: "canvas" });
-        const dates = history.map((h) => h.date);
-        const etf = history.map((h) => h.all8_scale_yi);
-        const idx = history.map((h) =>
-          h.hs300_close != null && h.hs300_close !== "" ? h.hs300_close : null
-        );
+      /** 按日期倒序填充明细表（最新在上） */
+      function renderHistoryTableBody() {
+        const tb = document.getElementById("history-table-body");
+        if (!tb) return;
+        tb.innerHTML = "";
+        const rows = currentHistory
+          .slice()
+          .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+        for (const r of rows) {
+          const tr = document.createElement("tr");
+          tr.className =
+            "border-b border-slate-700/40 transition-colors hover:bg-slate-800/50";
+          const fmt = function (v) {
+            if (v == null || v === "") return "—";
+            if (typeof v === "number" && !isNaN(v)) return v.toFixed(v >= 200 ? 2 : 4);
+            return String(v);
+          };
+          tr.innerHTML =
+            "<td class='whitespace-nowrap px-2 py-2 font-mono text-slate-200 md:px-3'>" +
+            (r.date || "—") +
+            "</td>" +
+            "<td class='px-2 py-2 md:px-3'>" +
+            fmt(r.all8_scale_yi) +
+            "</td>" +
+            "<td class='px-2 py-2 md:px-3'>" +
+            fmt(r.hs300_close) +
+            "</td>" +
+            "<td class='px-2 py-2 md:px-3'>" +
+            fmt(r.top2_scale_yi) +
+            "</td>" +
+            "<td class='px-2 py-2 md:px-3'>" +
+            fmt(r.other6_scale_yi) +
+            "</td>";
+          tb.appendChild(tr);
+        }
+      }
 
-        chart.setOption({
-          backgroundColor: "transparent",
-          textStyle: { color: "#94a3b8" },
-          axisPointer: {
-            type: "cross",
-            crossStyle: { color: "#64748b" },
-            lineStyle: { type: "dashed", color: "#475569" },
-          },
-          tooltip: {
-            trigger: "axis",
-            backgroundColor: "rgba(15, 23, 42, 0.92)",
-            borderColor: "rgba(148, 163, 184, 0.2)",
-            textStyle: { color: "#e2e8f0" },
-            formatter: function (params) {
-              if (!params || !params.length) return "";
-              const i = params[0].dataIndex;
-              const row = history[i];
-              if (!row) return "";
-              const d = row.date;
-              const a8 = row.all8_scale_yi;
-              const ic = row.hs300_close;
-              const lines = [
-                '<div class="font-semibold text-white">' + d + "</div>",
-                '<div class="mt-1 text-sky-300">8大ETF总规模：<b>' +
-                  (a8 != null ? a8.toFixed(2) + " 亿元" : "—") +
-                  "</b></div>",
-                '<div class="text-violet-300">沪深300：<b>' +
-                  (ic != null ? ic : "—") +
-                  "</b></div>",
-              ];
-              if (row.top2_scale_yi != null) {
-                lines.push(
-                  '<div class="text-slate-400 text-xs mt-1">TOP2：' +
-                    row.top2_scale_yi.toFixed(2) +
-                    " 亿 · 其余6：" +
-                    (row.other6_scale_yi != null ? row.other6_scale_yi.toFixed(2) : "—") +
-                    " 亿</div>"
-                );
-              }
-              return lines.join("");
-            },
-          },
-          legend: {
-            data: ["ETF总规模(亿元)", "沪深300指数"],
-            textStyle: { color: "#94a3b8" },
-            top: 0,
-            right: 8,
-          },
-          grid: { left: 56, right: 56, top: 44, bottom: 72 },
-          dataZoom: [
-            {
-              type: "inside",
-              start: 50,
-              end: 100,
-            },
-            {
-              type: "slider",
-              start: 50,
-              end: 100,
-              height: 22,
-              bottom: 16,
-              borderColor: "transparent",
-              backgroundColor: "rgba(30,41,59,0.5)",
-              fillerColor: "rgba(56, 189, 248, 0.25)",
-              handleStyle: { color: "#38bdf8" },
-              textStyle: { color: "#64748b" },
-            },
-          ],
-          xAxis: {
-            type: "category",
-            boundaryGap: false,
-            data: dates,
-            axisLabel: { color: "#64748b", rotate: 32, fontSize: 10 },
-            axisLine: { lineStyle: { color: "#334155" } },
-            splitLine: { show: false },
-          },
-          yAxis: [
-            {
-              type: "value",
-              name: "ETF总规模(亿元)",
-              nameTextStyle: { color: "#64748b", fontSize: 11 },
-              axisLabel: { color: "#64748b" },
-              splitLine: { lineStyle: { color: "rgba(51, 65, 85, 0.45)" } },
-            },
-            {
-              type: "value",
-              name: "沪深300指数",
-              scale: true,
-              nameTextStyle: { color: "#64748b", fontSize: 11 },
-              axisLabel: { color: "#64748b" },
-              splitLine: { show: false },
-            },
-          ],
-          series: [
-            {
-              name: "ETF总规模(亿元)",
-              type: "line",
-              smooth: true,
-              showSymbol: history.length < 35,
-              data: etf,
-              lineStyle: { width: 2.5, color: "#38bdf8" },
-              itemStyle: { color: "#38bdf8" },
-              areaStyle: {
-                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                  { offset: 0, color: "rgba(56, 189, 248, 0.35)" },
-                  { offset: 1, color: "rgba(56, 189, 248, 0.02)" },
-                ]),
-              },
-            },
-            {
-              name: "沪深300指数",
-              type: "line",
-              yAxisIndex: 1,
-              smooth: true,
-              showSymbol: history.length < 35,
-              data: idx,
-              connectNulls: false,
-              lineStyle: { width: 2.5, color: "#c084fc" },
-              itemStyle: { color: "#c084fc" },
-            },
-          ],
+      function openHistoryModal() {
+        const modal = document.getElementById("history-modal");
+        renderHistoryTableBody();
+        modal.classList.remove("hidden");
+        modal.classList.add("flex");
+      }
+
+      function closeHistoryModal() {
+        const modal = document.getElementById("history-modal");
+        modal.classList.add("hidden");
+        modal.classList.remove("flex");
+      }
+
+      function bindHistoryModal() {
+        document
+          .getElementById("btn-open-table")
+          .addEventListener("click", openHistoryModal);
+        document
+          .getElementById("btn-close-modal")
+          .addEventListener("click", closeHistoryModal);
+        document.getElementById("history-modal").addEventListener("click", function (e) {
+          if (e.target.id === "history-modal") closeHistoryModal();
         });
-
-        window.addEventListener("resize", function () {
-          chart.resize();
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") closeHistoryModal();
         });
       }
 
       function applyMock() {
+        activeMAs.clear();
         document.getElementById("data-source-hint").textContent = "演示数据（内置 Mock）";
         document.getElementById("data-source-hint").className = "text-xs text-amber-500/80";
         const hist = genMockHistory60();
@@ -491,6 +812,7 @@
       }
 
       function applyReal(data) {
+        activeMAs.clear();
         document.getElementById("data-source-hint").textContent = "data.json 实时数据";
         document.getElementById("data-source-hint").className = "text-xs text-emerald-500/80";
         const hist = data.history || [];
@@ -519,6 +841,7 @@
         applyMock();
       }
 
+      bindHistoryModal();
       init();
     })();
   </script>
