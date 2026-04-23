@@ -1,6 +1,6 @@
 {
   "meta": {
-    "updated_at": "2026-04-22T13:05:52",
+    "updated_at": "2026-04-23T13:05:21",
     "periods_days": [
       1,
       5,
@@ -17660,6 +17660,98 @@
           "days": 60,
           "etf_change_pct": -0.759,
           "index_change_pct": 2.9873,
+          "etf_trend": "down",
+          "index_trend": "up",
+          "divergence": true,
+          "divergence_type": "share_down_index_up",
+          "label": "份额↓ 指数↑（申赎/资金与指数背离）",
+          "compare_date": "2026-02-13"
+        }
+      }
+    },
+    {
+      "date": "2026-04-23",
+      "hs300_close": 4786.327,
+      "top2_scale_yi": 3485.530595,
+      "all8_scale_yi": 5593.207293,
+      "other6_scale_yi": 2107.676698,
+      "all8_shares_yi": 1215.470244,
+      "top2_shares_yi": 735.995317,
+      "other6_shares_yi": 479.474927,
+      "etf_per_code_yi": {
+        "510300": 2037.630225,
+        "510310": 1447.90037,
+        "510330": 956.754228,
+        "159919": 969.514376,
+        "515330": 89.036963,
+        "159925": 26.673648,
+        "510360": 30.833879,
+        "510350": 34.863604
+      },
+      "etf_per_code_shares_yi": {
+        "510300": 424.417876,
+        "510310": 311.577441,
+        "510330": 191.657498,
+        "159919": 193.709166,
+        "515330": 64.707095,
+        "159925": 5.520209,
+        "510360": 16.913812,
+        "510350": 6.967147
+      },
+      "periods": {
+        "1": {
+          "sufficient": true,
+          "days": 1,
+          "etf_change_pct": 0.0,
+          "index_change_pct": -0.2771,
+          "etf_trend": "flat",
+          "index_trend": "down",
+          "divergence": false,
+          "divergence_type": "none",
+          "label": "无背离",
+          "compare_date": "2026-04-22"
+        },
+        "5": {
+          "sufficient": true,
+          "days": 5,
+          "etf_change_pct": -1.4775,
+          "index_change_pct": 1.2193,
+          "etf_trend": "down",
+          "index_trend": "up",
+          "divergence": true,
+          "divergence_type": "share_down_index_up",
+          "label": "份额↓ 指数↑（申赎/资金与指数背离）",
+          "compare_date": "2026-04-18"
+        },
+        "13": {
+          "sufficient": true,
+          "days": 13,
+          "etf_change_pct": -2.7482,
+          "index_change_pct": 3.23,
+          "etf_trend": "down",
+          "index_trend": "up",
+          "divergence": true,
+          "divergence_type": "share_down_index_up",
+          "label": "份额↓ 指数↑（申赎/资金与指数背离）",
+          "compare_date": "2026-04-10"
+        },
+        "30": {
+          "sufficient": true,
+          "days": 30,
+          "etf_change_pct": -2.6497,
+          "index_change_pct": 6.9637,
+          "etf_trend": "down",
+          "index_trend": "up",
+          "divergence": true,
+          "divergence_type": "share_down_index_up",
+          "label": "份额↓ 指数↑（申赎/资金与指数背离）",
+          "compare_date": "2026-03-24"
+        },
+        "60": {
+          "sufficient": true,
+          "days": 60,
+          "etf_change_pct": -0.759,
+          "index_change_pct": 2.7019,
           "etf_trend": "down",
           "index_trend": "up",
           "divergence": true,
